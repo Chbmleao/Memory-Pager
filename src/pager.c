@@ -22,7 +22,7 @@
 struct page_table_cell {
   short valid;
   short present;
-  int page;
+  __intptr_t page;
   int frame;
 };
 
@@ -57,18 +57,18 @@ struct Node* createNode(pid_t pid) {
 	return newNode;
 }
 
-void insert(struct Node* head, pid_t pid) {
-	struct Node* newNode = createNode(pid);
+void insert(struct Node** head, pid_t pid) {
+  struct Node* newNode = createNode(pid);
 
-	if(head == NULL) {
-		head = newNode;
-	} else {
-		struct Node* current = head;
-		while (current->next != NULL) {
-			current = current->next;
-		}
-		current->next = newNode;
-	}
+  if(*head == NULL) {
+    *head = newNode;
+  } else {
+    struct Node* current = *head;
+    while (current->next != NULL) {
+      current = current->next;
+    }
+    current->next = newNode;
+  }
 }
 
 struct Node* removeProcess(struct Node* head, pid_t pid) {
@@ -94,15 +94,29 @@ struct Node* removeProcess(struct Node* head, pid_t pid) {
 
 struct Node* searchByPid(struct Node* head, pid_t pid) {
 	struct Node* current = head;
-
+  
 	while (current != NULL) {
 		if (current->data.pid == pid) {
 			return current;
 		}
 		current = current->next;
-	}
+	} 
 
 	return NULL;
+}
+
+struct page_table_cell* searchByPage(struct Node* head, pid_t pid, __intptr_t page) {
+  struct Node* pid_proccess = searchByPid(head, pid);
+  
+  if(pid_proccess == NULL) return NULL;
+  
+  for (int i = 0; i < NUM_PAGES; i++) {
+    if (pid_proccess->data.page_table[i].page == page) {
+      return &pid_proccess->data.page_table[i];
+    }
+  } 
+
+  return NULL;
 }
 
 void printList(struct Node* head) {
@@ -153,7 +167,7 @@ void pager_init(int nframes, int nblocks) {
 }
 
 void pager_create(pid_t pid) {
-  insert(head_process, pid);
+  insert(&head_process, pid);
 }
 
 void *pager_extend(pid_t pid) {
@@ -182,18 +196,21 @@ void *pager_extend(pid_t pid) {
 
   for (int i=0; i < NUM_PAGES; i++) {
     if (process_node->data.page_table[i].page == -1) {
-      int virtual_address = UVM_BASEADDR + (intptr_t) (i * sysconf(_SC_PAGESIZE));
+      __intptr_t virtual_address = UVM_BASEADDR + (intptr_t) (i * sysconf(_SC_PAGESIZE));
       process_node->data.page_table[i].page = virtual_address;
       process_node->data.page_table[i].frame = free_idx;
-      process_node->data.page_table[i].valid = 1;
-      process_node->data.page_table[i].present = 1;
       return (void*) virtual_address;
     }
   }
+
+  return NULL;
 }
 
 void pager_destroy(pid_t pid) {
   struct Node *process_node = searchByPid(head_process, pid);
+  
+  if(process_node == NULL) return;
+
   for (int i = 0; i < NUM_PAGES; i++) {
     int remove_idx = process_node->data.page_table[i].frame;
     if (remove_idx == -1) 
@@ -204,8 +221,8 @@ void pager_destroy(pid_t pid) {
   }
 
 	for (int i = 0; i < blocks_vector_size; i++) {
-		if(blocks_vector == pid) {
-			blocks_vector = -1;
+		if(blocks_vector[i] == pid) {
+			blocks_vector[i] = -1;
 			free_frames++;
 		}
 	}
@@ -217,9 +234,17 @@ void pager_fault(pid_t pid, void *addr) {
   struct Node *process_node = searchByPid(head_process, pid);
 
   for (int i = 0; i < NUM_PAGES; i++) {
-    struct page_table_cell page_cell = process_node->data.page_table[i];
-    if (page_cell.page == (intptr_t) addr) {
-      if (page_cell.valid == 1 && page_cell.present == 0) {
+    struct page_table_cell *page_cell = &process_node->data.page_table[i];
+    if (page_cell->page == (intptr_t) addr) {
+      if(page_cell->valid == 0) {
+        mmu_zero_fill(page_cell->frame);
+        mmu_resident(pid, (void *) page_cell->page, page_cell->frame, PROT_READ);
+        page_cell->valid = 1;
+        page_cell->present = 1;
+        return;
+      } else if (page_cell->present == 1) {
+        mmu_chprot(pid, (void *) page_cell->page, PROT_READ | PROT_WRITE);
+      } else if (page_cell->present == 0) {
         return;
       } 
     }
@@ -227,15 +252,15 @@ void pager_fault(pid_t pid, void *addr) {
 }
 
 int pager_syslog(pid_t pid, void *addr, size_t len) {
-  // atribua o valor de pmem, dos indexes addr até len
-  char *buf = malloc(len * sizeof(char));
-  for (int i = (intptr_t) addr; i < (intptr_t) addr + len; i++) {
-    buf[i] = pmem[i];
-  }
+  if(addr == NULL) return 0;
 
-  for(int i = 0; i < len; i++) {        // len é o número de bytes a imprimir
-    printf("%02x", (unsigned)buf[i]); // buf contém os dados a serem impressos
+  struct page_table_cell *page_table_cell = searchByPage(head_process, pid, (intptr_t) addr);
+  int physical_address = page_table_cell->frame * sysconf(_SC_PAGESIZE);
+
+  for(int i = physical_address; i < physical_address + len; i++) {
+    printf("%02x", (unsigned)pmem[i]);
   }
+  printf("\n");
 
   return 0;
 }
