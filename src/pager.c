@@ -19,30 +19,32 @@
  ***************************************************************************/
 struct process_data {
 	pid_t pid;
-	int* page_table;
+	int valid;
+	int present_on_memory;
 } process_data_t;
 
 struct Node {
 	struct process_data data;
-	struct Node* next;
+	struct Node *next;
 };
 
-struct Node* createNode(pid_t pid, int* page_table) {
+struct Node* createNode(pid_t pid) {
 	struct Node* newNode = (struct Node*)malloc(sizeof(struct Node));
 	if (newNode == NULL) {
 		printf("Memory allocation failed\n");
 		exit(EXIT_FAILURE);
 	}
 
+	newNode->data.valid = 0;
+	newNode->data.present_on_memory = 0;
 	newNode->data.pid = pid;
-	newNode->data.page_table = page_table;
 	newNode->next = NULL;
 
 	return newNode;
 }
 
-void insert(struct Node* head, pid_t pid, int* page_table) {
-	struct Node* newNode = createNode(pid,page_table);
+void insert(struct Node* head, pid_t pid) {
+	struct Node* newNode = createNode(pid);
 
 	if(head == NULL) {
 		head = newNode;
@@ -104,7 +106,6 @@ void printList(struct Node* head) {
  ***************************************************************************/
 typedef struct frame {
 	pid_t pid;
-	int page_number;
 	int occupied_frame;
 } frame_t;
 
@@ -112,7 +113,7 @@ typedef struct frame {
 frame_t *frames_vector;
 int frames_vector_size;
 int free_frames;
-int *blocks_vector;
+frame_t *blocks_vector;
 int blocks_vector_size;
 int free_blocks;
 struct Node* head_process;
@@ -125,21 +126,21 @@ void pager_init(int nframes, int nblocks) {
   }
 
   frames_vector = malloc(nframes * sizeof(frame_t));
-  blocks_vector = malloc(nblocks * sizeof(int));
+  blocks_vector = malloc(nblocks * sizeof(frame_t));
   free_frames = nframes;
   free_blocks = nblocks;
   frames_vector_size = nframes;
   blocks_vector_size = nblocks;
   for (int i = 0; i < nframes; i++) {
     frames_vector[i].pid = -1;
-    frames_vector[i].page_number = -1;
     frames_vector[i].occupied_frame = 0;
   }
   for (int i = 0; i < nblocks; i++) {
-    blocks_vector[i] = 0;
+    blocks_vector[i].pid = -1;
+    blocks_vector[i].occupied_frame = 0;
   }
 
-  head_process = createNode(-1, NULL);
+  head_process = createNode(-1);
 }
 
 void pager_create(pid_t pid) {
@@ -154,23 +155,14 @@ void pager_create(pid_t pid) {
     printf("Memory allocation failed\n");
     exit(EXIT_FAILURE);
   }
-  insert(head_process, pid, page_table);
+  insert(head_process, pid);
 }
 
 void *pager_extend(pid_t pid) {
   if (free_blocks == 0 )
     return NULL;
   
-  int block, frame = -1;
-
-  for (int i=0; i < blocks_vector_size; i++) {
-    if (blocks_vector[i] == 0) {
-      blocks_vector[i] = 1;
-      free_blocks--;
-      block = i;
-      break;
-    }
-  }
+  int frame = -1;
 
   for (int i=0; i < frames_vector_size; i++) {
     if (frames_vector[i].occupied_frame == 0) {
@@ -185,7 +177,23 @@ void *pager_extend(pid_t pid) {
 }
 
 void pager_destroy(pid_t pid) {
+	for (int i = 0; i < frames_vector_size; i++) {
+		if(frames_vector->pid == pid) {
+			frames_vector->pid = -1;
+			frames_vector->occupied_frame = 0;
+			free_frames++;
+		}
+	} 
 
+	for (int i = 0; i < blocks_vector_size; i++) {
+		if(blocks_vector->pid == pid) {
+			blocks_vector->pid = -1;
+			blocks_vector->occupied_frame = 0;
+			free_frames++;
+		}
+	} 
+
+	removeProcess(head_process, pid);
 }
 
 void pager_fault(pid_t pid, void *addr) {
