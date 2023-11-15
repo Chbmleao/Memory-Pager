@@ -1,42 +1,68 @@
 #include "pager.h"
 #include "uvm.h"
+#include "linked_list.h"
+#include "mmu.h"
 
-struct process_data {
-    pid_t pid;
-    int* page_table;
-};
+#include <sys/mman.h>
+#include <assert.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 
-struct pager_data {
-    int nframes;
-    int nblocks;
-    int numProcesses;
-    struct process_data* proccesses_datas;
-};
+typedef struct frame {
+	pid_t pid;
+	int page_number;
+	int occupied_frame;
+} frame_t;
 
-struct pager_data pager_data;
+
+frame_t *frames_vector;
+int free_frames;
+int *blocks_vector;
+int free_blocks;
+struct Node* head_process;
+
 
 void pager_init(int nframes, int nblocks) {
-    uvm_create();
-    pager_data.nframes = nframes;
-    pager_data.nblocks = nblocks;
-    pager_data.numProcesses = 0;
+  if (nframes <= 0 || nblocks <= 0) {
+    printf("Pager initialization failed\n");
+		exit(EXIT_FAILURE);
+  }
 
-    struct process_data p;
-    p.pid = -1;
-    p.page_table = NULL;
-    pager_data.proccesses_datas[0] = p;
+  uvm_create();
+
+  frames_vector = malloc(nframes * sizeof(frame_t));
+  blocks_vector = malloc(nblocks * sizeof(int));
+  free_frames = nframes;
+  free_blocks = nblocks;
+  for (int i = 0; i < nframes; i++) {
+    frames_vector[i].pid = -1;
+    frames_vector[i].page_number = -1;
+    frames_vector[i].occupied_frame = 0;
+  }
+  for (int i = 0; i < nblocks; i++) {
+    blocks_vector[i] = 0;
+  }
+
+  head_process = createNode(-1, NULL);
 }
 
 void pager_create(pid_t pid) {
-    struct process_data p;
-    p.pid = pid;
-    p.page_table = NULL;
-    pager_data.proccesses_datas[pager_data.numProcesses];
-    pager_data.numProcesses++;
+  int num_pages = (UVM_MAXADDR - UVM_BASEADDR + 1) / sysconf(_SC_PAGESIZE);
+
+  int *page_table = malloc(num_pages * sizeof(int));
+
+  if (page_table == NULL) {
+    printf("Memory allocation failed\n");
+    exit(EXIT_FAILURE);
+  }
+  insert(head_process, pid, page_table);
 }
 
 void *pager_extend(pid_t pid) {
-
+  int *address = uvm_extend();
 }
 
 void pager_destroy(pid_t pid) {
