@@ -1,0 +1,4 @@
+*.out
+*.log.0
+bin/test*
+bin/mmu*
