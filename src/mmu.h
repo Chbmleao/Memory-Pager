@@ -51,7 +51,7 @@ void mmu_chprot(pid_t pid, void *vaddr, int prot);
 
 /* `mmu_disk_read` copies content from disk block `block_from` into
  * physical frame `frame_to`.  `mmu_disk_write` copies content from
- * frame `frame_from` to disk block `block_to`.  Your pager shoudl
+ * frame `frame_from` to disk block `block_to`.  Your pager should
  * use these functions to save paged-out frames.  */
 void mmu_disk_read(int block_from, int frame_to);
 void mmu_disk_write(int frame_from, int block_to);

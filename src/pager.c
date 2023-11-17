@@ -200,12 +200,20 @@ void *pager_extend(pid_t pid) {
     return NULL;
 
   int free_idx = -1;
-  if (free_frames == 0)  {
-    // TODO: implement second-chance algorithm
+  if ((blocks_vector_size - free_blocks) >= frames_vector_size)  {
+    for (int i=0; i < blocks_vector_size; i++) {
+      if(blocks_vector[i] == -1) {
+        blocks_vector[i] = pid;
+        free_blocks--;
+        break;
+      }
+    }
   } else {
     for (int i=0; i < frames_vector_size; i++) {
       if (frames_vector[i] == -1) {
         frames_vector[i] = pid;
+        blocks_vector[i] = pid;
+        free_blocks--;
         free_idx = i;
         break;
       }
