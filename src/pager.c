@@ -24,6 +24,7 @@ struct page_table_cell {
   short present;
   short prot;
   short recently_accessed;
+  short has_data;
   __intptr_t page;
   int frame;
 };
@@ -51,6 +52,7 @@ struct Node* createNode(pid_t pid) {
     page_table[i].valid = 0;
     page_table[i].present = 0;
     page_table[i].recently_accessed = 0;
+    page_table[i].has_data = 0;
     page_table[i].page = -1;
     page_table[i].frame = -1;
   }
@@ -271,11 +273,18 @@ void _handleSwap(struct Node *process_node, int cell_idx) {
   }
 
   mmu_nonresident(process_node->data.pid, (void *) last_freed_cell->page);
-  mmu_zero_fill(last_freed_cell->frame);
+  
+  if(last_freed_cell->has_data) {
+    mmu_disk_write(last_freed_cell->frame, last_freed_cell->frame);
+  }
+  if(page_cell->has_data) {
+    mmu_disk_read(page_cell->frame, last_freed_cell->frame);
+  } else {
+    mmu_zero_fill(last_freed_cell->frame);
+  }
   last_freed_cell->present = 0;
 
   page_cell->frame = last_freed_cell->frame;
-  
   mmu_resident(process_node->data.pid, (void *) page_cell->page, page_cell->frame, PROT_READ);
   page_cell->prot = PROT_READ;
 }
@@ -303,6 +312,7 @@ void pager_fault(pid_t pid, void *addr) {
       } else if (page_cell->present == 1) {
         mmu_chprot(pid, (void *) page_cell->page, PROT_READ | PROT_WRITE);
         page_cell->prot = PROT_READ | PROT_WRITE;
+        page_cell->has_data = 1;
       } else if (page_cell->present == 0) {
         _handleSwap(process_node, i);
         page_cell->present = 1;
