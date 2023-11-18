@@ -32,6 +32,7 @@ struct page_table_cell {
 struct process_data {
   pid_t pid;
   size_t frames_allocated;
+  short queue;
   struct page_table_cell *page_table;
 };
 
@@ -59,6 +60,7 @@ struct Node* createNode(pid_t pid) {
   newNode->data.page_table = page_table;
   newNode->data.pid = pid;
   newNode->data.frames_allocated = 0;
+  newNode->data.queue = 0;
 	newNode->next = NULL;
 
 	return newNode;
@@ -78,14 +80,14 @@ void insert(struct Node** head, pid_t pid) {
   }
 }
 
-struct Node* removeProcess(struct Node* head, pid_t pid) {
-	struct Node* current = head;
+struct Node* removeProcess(struct Node** head, pid_t pid) {
+	struct Node* current = *head;
 	struct Node* previous = NULL;
 
 	while (current != NULL) {
 		if (current->data.pid == pid) {
 			if (previous == NULL) {
-				head = current->next;
+				*head = current->next;
 			} else {
 				previous->next = current->next;
 			}
@@ -112,15 +114,27 @@ struct Node* searchByPid(struct Node* head, pid_t pid) {
 	return NULL;
 }
 
-struct page_table_cell* searchByPage(struct Node* head, pid_t pid, __intptr_t page) {
+struct Node* getNextNode(struct Node* process, struct Node* head) {
+  if (process->next != NULL) return process->next;
+  else if(process != head) return head;
+
+	return NULL;
+}
+
+struct page_table_cell* searchByPage(struct Node* head, pid_t pid, __intptr_t virtual_addr) {
   struct Node* pid_proccess = searchByPid(head, pid);
   
   if(pid_proccess == NULL) return NULL;
   
   for (int i = 0; i < NUM_PAGES; i++) {
-    if (pid_proccess->data.page_table[i].page == page) {
-      return &pid_proccess->data.page_table[i];
+    struct page_table_cell* page_cell = &pid_proccess->data.page_table[i];
+    short address_is_at_page_cell = page_cell->page <= virtual_addr && virtual_addr < page_cell->page + sysconf(_SC_PAGESIZE);
+
+    if (address_is_at_page_cell) {
+      return page_cell;
     }
+
+    if(page_cell->page == -1) break;
   } 
 
   return NULL;
@@ -169,6 +183,7 @@ int *blocks_vector;
 int blocks_vector_size;
 int free_blocks;
 int last_freed_frame_idx = -1;
+pid_t mutex_turn = -1;
 struct Node* head_process = NULL;
 
 void pager_init(int nframes, int nblocks) {
@@ -199,24 +214,11 @@ void *pager_extend(pid_t pid) {
   if (free_blocks == 0)
     return NULL;
 
-  int free_idx = -1;
-  if ((blocks_vector_size - free_blocks) >= frames_vector_size)  {
-    for (int i=0; i < blocks_vector_size; i++) {
-      if(blocks_vector[i] == -1) {
-        blocks_vector[i] = pid;
-        free_blocks--;
-        break;
-      }
-    }
-  } else {
-    for (int i=0; i < frames_vector_size; i++) {
-      if (frames_vector[i] == -1) {
-        frames_vector[i] = pid;
-        blocks_vector[i] = pid;
-        free_blocks--;
-        free_idx = i;
-        break;
-      }
+  for (int i=0; i < blocks_vector_size; i++) {
+    if(blocks_vector[i] == -1) {
+      blocks_vector[i] = pid;
+      free_blocks--;
+      break;
     }
   }
 
@@ -229,7 +231,6 @@ void *pager_extend(pid_t pid) {
     if (process_node->data.page_table[i].page == -1) {
       __intptr_t virtual_address = UVM_BASEADDR + (intptr_t) (i * sysconf(_SC_PAGESIZE));
       process_node->data.page_table[i].page = virtual_address;
-      process_node->data.page_table[i].frame = free_idx;
       return (void*) virtual_address;
     }
   }
@@ -258,7 +259,7 @@ void pager_destroy(pid_t pid) {
 		}
 	}
 
-	removeProcess(head_process, pid);
+	removeProcess(&head_process, pid);
 }
 
 void _handleSwap(struct Node *process_node, int cell_idx) {
@@ -299,16 +300,35 @@ void _handleSwap(struct Node *process_node, int cell_idx) {
 
 void pager_fault(pid_t pid, void *addr) {
   struct Node *process_node = searchByPid(head_process, pid);
+  
+  process_node->data.queue = 1;
+  struct Node *next_node = getNextNode(process_node, head_process);
+  if(next_node != NULL) {
+    mutex_turn = next_node->data.pid;
+    while(next_node->data.queue && (mutex_turn == next_node->data.pid));
+  }
 
   for (int i = 0; i < NUM_PAGES; i++) {
     struct page_table_cell *page_cell = &process_node->data.page_table[i];
-    if (page_cell->page == (intptr_t) addr) {
+    __intptr_t virtual_addr = (intptr_t) addr;
+   
+    short address_is_at_page_cell = page_cell->page <= virtual_addr && virtual_addr < page_cell->page + sysconf(_SC_PAGESIZE);
+    
+    if (address_is_at_page_cell) {
       if(page_cell->valid == 0) {
         if(free_frames > 0) {
+          for (int i=0; i < frames_vector_size; i++) {
+            if (frames_vector[i] == -1) {
+              frames_vector[i] = pid;
+              free_frames--;
+              page_cell->frame = i;
+              break;
+            }
+          }
+
           mmu_zero_fill(page_cell->frame);
           mmu_resident(pid, (void *) page_cell->page, page_cell->frame, PROT_READ);
           page_cell->prot = PROT_READ;
-          free_frames--;
         } else {
           _handleSwap(process_node, i);
         }
@@ -316,7 +336,7 @@ void pager_fault(pid_t pid, void *addr) {
         page_cell->valid = 1;
         page_cell->present = 1;
         process_node->data.frames_allocated++;
-        return;
+        break;
       } else if (page_cell->present == 1) {
         mmu_chprot(pid, (void *) page_cell->page, PROT_READ | PROT_WRITE);
         page_cell->prot = PROT_READ | PROT_WRITE;
@@ -324,22 +344,31 @@ void pager_fault(pid_t pid, void *addr) {
       } else if (page_cell->present == 0) {
         _handleSwap(process_node, i);
         page_cell->present = 1;
-        return;
+        break;
       } 
     }
+
+    if(page_cell->page == -1) break;
   }
+
+  process_node->data.queue = 0;
 }
 
 int pager_syslog(pid_t pid, void *addr, size_t len) {
   if(addr == NULL) return 0;
 
   struct page_table_cell *page_table_cell = searchByPage(head_process, pid, (intptr_t) addr);
-  int physical_address = page_table_cell->frame * sysconf(_SC_PAGESIZE);
+  if(page_table_cell != NULL && page_table_cell->present) {
+    __intptr_t shift = (intptr_t) addr - page_table_cell->page;
+    int physical_address = (page_table_cell->frame * sysconf(_SC_PAGESIZE)) + shift;
 
-  for(int i = physical_address; i < physical_address + len; i++) {
-    printf("%02x", (unsigned)pmem[i]);
+    
+    for(int i = physical_address; i < physical_address + len; i++) {
+      printf("%02x", (unsigned)pmem[i]);
+    }
+    printf("\n");
+    return 0;
   }
-  printf("\n");
 
-  return 0;
+  return -1;
 }
