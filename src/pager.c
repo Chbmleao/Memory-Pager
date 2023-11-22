@@ -19,6 +19,12 @@
 /****************************************************************************
  * Chained List Data Structure
  ***************************************************************************/
+
+struct least_frequently_pointer {
+  struct Node* initial_process;
+  int initial_page;
+};
+
 struct page_table_cell {
   short valid;
   short present;
@@ -49,7 +55,7 @@ struct Node* createNode(pid_t pid) {
 	}
 
   struct page_table_cell *page_table = malloc(NUM_PAGES * sizeof(struct page_table_cell));
-  for (int i = 0; i< NUM_PAGES; i++) {
+  for (int i = 0; i < NUM_PAGES; i++) {
     page_table[i].valid = 0;
     page_table[i].present = 0;
     page_table[i].recently_accessed = 0;
@@ -140,21 +146,33 @@ struct page_table_cell* searchByPage(struct Node* head, pid_t pid, __intptr_t vi
   return NULL;
 }
 
-int searchLeastFrequentlyUsedFrameIdx(struct Node* process, int initial) { 
-  if(process == NULL) return 0;
+struct least_frequently_pointer* searchLeastFrequentlyUsedFrameIdx(struct Node* head, struct least_frequently_pointer* pointer) {
+  struct Node* process = head;
+  if(pointer->initial_process != NULL) process = pointer->initial_process;
 
-  size_t i = initial;
+  size_t i = pointer->initial_page;
+  if(pointer->initial_page == -1) pointer->initial_page = 0;
   while (1) {
+    while(process->data.frames_allocated == 0) {
+      process = getNextNode(process, head);
+    }
     i = (i + 1) % process->data.frames_allocated;
 
-    if(process->data.page_table[i].present != 0) {
+    if(process->data.page_table[i].present == 1) {
       if (process->data.page_table[i].recently_accessed == 0) {
-        return i;
+        pointer->initial_process = process;
+        pointer->initial_page = i;
+        return pointer;
       }
 
       process->data.page_table[i].recently_accessed = 0;
-    }  
+    }
 
+    if(i == pointer->initial_page) {
+      process = getNextNode(process, head);
+      i = 0;
+      pointer->initial_page = 0;
+    }
   }
 }
 
@@ -182,8 +200,10 @@ int free_frames;
 int *blocks_vector;
 int blocks_vector_size;
 int free_blocks;
-int last_freed_frame_idx = -1;
+struct least_frequently_pointer default_least_frequently_pointer = {NULL, -1};
+struct least_frequently_pointer* last_freed_frame_addr = &default_least_frequently_pointer;
 pid_t mutex_turn = -1;
+static pthread_mutex_t locker;
 struct Node* head_process = NULL;
 
 void pager_init(int nframes, int nblocks) {
@@ -204,6 +224,7 @@ void pager_init(int nframes, int nblocks) {
   for (int i = 0; i < nblocks; i++) {
     blocks_vector[i] = -1;
   }
+  pthread_mutex_init(&locker, NULL);
 }
 
 void pager_create(pid_t pid) {
@@ -242,34 +263,43 @@ void pager_destroy(pid_t pid) {
   struct Node *process_node = searchByPid(head_process, pid);
   
   if(process_node == NULL) return;
+  // pthread_mutex_lock(&locker);
 
-  for (int i = 0; i < NUM_PAGES; i++) {
-    int remove_idx = process_node->data.page_table[i].frame;
-    if (remove_idx == -1) 
-      break;
+  for (int i = 0; i < frames_vector_size; i++) {
+    // int remove_idx = process_node->data.page_table[i].frame;
+    // if (remove_idx == -1) 
+    //   break;
     
-    frames_vector[remove_idx] = -1;
-    free_frames++;
+    if(frames_vector[i] == pid) {
+      frames_vector[i] = -1;
+      free_frames++;
+    }
   }
 
 	for (int i = 0; i < blocks_vector_size; i++) {
 		if(blocks_vector[i] == pid) {
 			blocks_vector[i] = -1;
-			free_frames++;
+			free_blocks++;
 		}
 	}
 
 	removeProcess(&head_process, pid);
+  // pthread_mutex_unlock(&locker);
+  if(head_process == NULL) {
+    free(frames_vector);
+    free(blocks_vector);
+    pthread_mutex_destroy(&locker);
+  }
 }
 
 void _handleSwap(struct Node *process_node, int cell_idx) {
   struct page_table_cell *page_cell = &process_node->data.page_table[cell_idx];
   
-  last_freed_frame_idx = searchLeastFrequentlyUsedFrameIdx(process_node, last_freed_frame_idx);
-  struct page_table_cell *last_freed_cell = &process_node->data.page_table[last_freed_frame_idx];
+  last_freed_frame_addr = searchLeastFrequentlyUsedFrameIdx(head_process, last_freed_frame_addr);
+  struct page_table_cell *last_freed_cell = &last_freed_frame_addr->initial_process->data.page_table[last_freed_frame_addr->initial_page];
           
   if(last_freed_cell->prot != PROT_NONE) {
-    size_t it = last_freed_frame_idx;
+    size_t it = last_freed_frame_addr->initial_page;
     
     while(process_node->data.page_table[it].prot != PROT_NONE) {
       if(process_node->data.page_table[it].present) {
@@ -301,12 +331,10 @@ void _handleSwap(struct Node *process_node, int cell_idx) {
 void pager_fault(pid_t pid, void *addr) {
   struct Node *process_node = searchByPid(head_process, pid);
   
-  process_node->data.queue = 1;
-  struct Node *next_node = getNextNode(process_node, head_process);
-  if(next_node != NULL) {
-    mutex_turn = next_node->data.pid;
-    while(next_node->data.queue && (mutex_turn == next_node->data.pid));
-  }
+  // if(pthread_mutex_trylock(&locker) != 0) {
+  //   printf("mutex locked\n");
+  // }
+  // pthread_mutex_lock(&locker);
 
   for (int i = 0; i < NUM_PAGES; i++) {
     struct page_table_cell *page_cell = &process_node->data.page_table[i];
@@ -351,24 +379,31 @@ void pager_fault(pid_t pid, void *addr) {
     if(page_cell->page == -1) break;
   }
 
-  process_node->data.queue = 0;
+  // pthread_mutex_unlock(&locker);
 }
 
 int pager_syslog(pid_t pid, void *addr, size_t len) {
-  if(addr == NULL) return 0;
+  int syslog_status = 0;
+
+  if(addr == NULL) return syslog_status;
+  if(pthread_mutex_trylock(&locker) != 0) {
+    printf("mutex locked\n");
+  }
+  // pthread_mutex_lock(&locker);
 
   struct page_table_cell *page_table_cell = searchByPage(head_process, pid, (intptr_t) addr);
   if(page_table_cell != NULL && page_table_cell->present) {
     __intptr_t shift = (intptr_t) addr - page_table_cell->page;
-    int physical_address = (page_table_cell->frame * sysconf(_SC_PAGESIZE)) + shift;
+    long physical_address = (page_table_cell->frame * sysconf(_SC_PAGESIZE)) + shift;
 
-    
-    for(int i = physical_address; i < physical_address + len; i++) {
+    for(long i = physical_address; i < physical_address + len; i++) {
       printf("%02x", (unsigned)pmem[i]);
     }
     printf("\n");
-    return 0;
-  }
 
-  return -1;
+    syslog_status = 0;
+  } else syslog_status = -1;
+  
+  // pthread_mutex_unlock(&locker);
+  return syslog_status;
 }
