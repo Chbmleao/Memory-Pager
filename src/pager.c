@@ -122,9 +122,7 @@ struct Node* searchByPid(struct Node* head, pid_t pid) {
 
 struct Node* getNextNode(struct Node* process, struct Node* head) {
   if (process->next != NULL) return process->next;
-  else if(process != head) return head;
-
-	return NULL;
+  else return head;
 }
 
 struct page_table_cell* searchByPage(struct Node* head, pid_t pid, __intptr_t virtual_addr) {
@@ -151,12 +149,23 @@ struct least_frequently_pointer* searchLeastFrequentlyUsedFrameIdx(struct Node* 
   if(pointer->initial_process != NULL) process = pointer->initial_process;
 
   size_t i = pointer->initial_page;
-  if(pointer->initial_page == -1) pointer->initial_page = 0;
   while (1) {
     while(process->data.frames_allocated == 0) {
       process = getNextNode(process, head);
     }
     i = (i + 1) % process->data.frames_allocated;
+
+    if(i == pointer->initial_page) {
+      process = getNextNode(process, head);
+      if(process == pointer->initial_process) {
+        pointer->initial_page = (pointer->initial_page + 1) % process->data.frames_allocated;
+        return pointer;
+      };
+
+      i = -1;
+      pointer->initial_page = -1;
+      continue;
+    }
 
     if(process->data.page_table[i].present == 1) {
       if (process->data.page_table[i].recently_accessed == 0) {
@@ -165,14 +174,12 @@ struct least_frequently_pointer* searchLeastFrequentlyUsedFrameIdx(struct Node* 
         return pointer;
       }
 
+      mmu_chprot(process->data.pid, (void *) process->data.page_table[i].page, PROT_NONE);
+      process->data.page_table[i].prot = PROT_NONE;
       process->data.page_table[i].recently_accessed = 0;
     }
 
-    if(i == pointer->initial_page) {
-      process = getNextNode(process, head);
-      i = 0;
-      pointer->initial_page = 0;
-    }
+    if(pointer->initial_page == -1) pointer->initial_page = 0;
   }
 }
 
@@ -232,8 +239,12 @@ void pager_create(pid_t pid) {
 }
 
 void *pager_extend(pid_t pid) {
-  if (free_blocks == 0)
+  pthread_mutex_trylock(&locker);
+  
+  if (free_blocks == 0) {
+    pthread_mutex_unlock(&locker);
     return NULL;
+  }
 
   for (int i=0; i < blocks_vector_size; i++) {
     if(blocks_vector[i] == -1) {
@@ -245,6 +256,7 @@ void *pager_extend(pid_t pid) {
 
   struct Node *process_node = searchByPid(head_process, pid);
   if (process_node == NULL) {
+    pthread_mutex_unlock(&locker);
     exit(EXIT_FAILURE);
   }
 
@@ -252,24 +264,25 @@ void *pager_extend(pid_t pid) {
     if (process_node->data.page_table[i].page == -1) {
       __intptr_t virtual_address = UVM_BASEADDR + (intptr_t) (i * sysconf(_SC_PAGESIZE));
       process_node->data.page_table[i].page = virtual_address;
+      pthread_mutex_unlock(&locker);
       return (void*) virtual_address;
     }
   }
 
+  pthread_mutex_unlock(&locker);
   return NULL;
 }
 
 void pager_destroy(pid_t pid) {
+  pthread_mutex_trylock(&locker);
   struct Node *process_node = searchByPid(head_process, pid);
   
-  if(process_node == NULL) return;
-  // pthread_mutex_lock(&locker);
+  if(process_node == NULL) {
+    pthread_mutex_unlock(&locker);
+    return;
+  };
 
-  for (int i = 0; i < frames_vector_size; i++) {
-    // int remove_idx = process_node->data.page_table[i].frame;
-    // if (remove_idx == -1) 
-    //   break;
-    
+  for (int i = 0; i < frames_vector_size; i++) {  
     if(frames_vector[i] == pid) {
       frames_vector[i] = -1;
       free_frames++;
@@ -284,7 +297,7 @@ void pager_destroy(pid_t pid) {
 	}
 
 	removeProcess(&head_process, pid);
-  // pthread_mutex_unlock(&locker);
+  pthread_mutex_unlock(&locker);
   if(head_process == NULL) {
     free(frames_vector);
     free(blocks_vector);
@@ -297,19 +310,6 @@ void _handleSwap(struct Node *process_node, int cell_idx) {
   
   last_freed_frame_addr = searchLeastFrequentlyUsedFrameIdx(head_process, last_freed_frame_addr);
   struct page_table_cell *last_freed_cell = &last_freed_frame_addr->initial_process->data.page_table[last_freed_frame_addr->initial_page];
-          
-  if(last_freed_cell->prot != PROT_NONE) {
-    size_t it = last_freed_frame_addr->initial_page;
-    
-    while(process_node->data.page_table[it].prot != PROT_NONE) {
-      if(process_node->data.page_table[it].present) {
-        mmu_chprot(process_node->data.pid, (void *) process_node->data.page_table[it].page, PROT_NONE);
-        process_node->data.page_table[it].prot = PROT_NONE;
-      }
-
-      it = (it + 1) % process_node->data.frames_allocated;
-    }
-  }
 
   mmu_nonresident(process_node->data.pid, (void *) last_freed_cell->page);
   
@@ -326,15 +326,12 @@ void _handleSwap(struct Node *process_node, int cell_idx) {
   page_cell->frame = last_freed_cell->frame;
   mmu_resident(process_node->data.pid, (void *) page_cell->page, page_cell->frame, PROT_READ);
   page_cell->prot = PROT_READ;
+  page_cell->recently_accessed = 1;
 }
 
 void pager_fault(pid_t pid, void *addr) {
+  pthread_mutex_trylock(&locker);
   struct Node *process_node = searchByPid(head_process, pid);
-  
-  // if(pthread_mutex_trylock(&locker) != 0) {
-  //   printf("mutex locked\n");
-  // }
-  // pthread_mutex_lock(&locker);
 
   for (int i = 0; i < NUM_PAGES; i++) {
     struct page_table_cell *page_cell = &process_node->data.page_table[i];
@@ -357,6 +354,7 @@ void pager_fault(pid_t pid, void *addr) {
           mmu_zero_fill(page_cell->frame);
           mmu_resident(pid, (void *) page_cell->page, page_cell->frame, PROT_READ);
           page_cell->prot = PROT_READ;
+          page_cell->recently_accessed = 1;
         } else {
           _handleSwap(process_node, i);
         }
@@ -366,9 +364,15 @@ void pager_fault(pid_t pid, void *addr) {
         process_node->data.frames_allocated++;
         break;
       } else if (page_cell->present == 1) {
-        mmu_chprot(pid, (void *) page_cell->page, PROT_READ | PROT_WRITE);
-        page_cell->prot = PROT_READ | PROT_WRITE;
+        if(page_cell->prot == PROT_NONE) {
+          mmu_chprot(pid, (void *) page_cell->page, PROT_READ);
+          page_cell->prot = PROT_READ;
+        } else if(page_cell->prot == PROT_READ) {
+          mmu_chprot(pid, (void *) page_cell->page, PROT_READ | PROT_WRITE);
+          page_cell->prot = PROT_READ | PROT_WRITE;
+        }
         page_cell->has_data = 1;
+        page_cell->recently_accessed = 1;
       } else if (page_cell->present == 0) {
         _handleSwap(process_node, i);
         page_cell->present = 1;
@@ -379,17 +383,15 @@ void pager_fault(pid_t pid, void *addr) {
     if(page_cell->page == -1) break;
   }
 
-  // pthread_mutex_unlock(&locker);
+  pthread_mutex_unlock(&locker);
 }
 
 int pager_syslog(pid_t pid, void *addr, size_t len) {
+  pthread_mutex_trylock(&locker);
   int syslog_status = 0;
 
   if(addr == NULL) return syslog_status;
-  if(pthread_mutex_trylock(&locker) != 0) {
-    printf("mutex locked\n");
-  }
-  // pthread_mutex_lock(&locker);
+ 
 
   struct page_table_cell *page_table_cell = searchByPage(head_process, pid, (intptr_t) addr);
   if(page_table_cell != NULL && page_table_cell->present) {
@@ -404,6 +406,6 @@ int pager_syslog(pid_t pid, void *addr, size_t len) {
     syslog_status = 0;
   } else syslog_status = -1;
   
-  // pthread_mutex_unlock(&locker);
+  pthread_mutex_unlock(&locker);
   return syslog_status;
 }
