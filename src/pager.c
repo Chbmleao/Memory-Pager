@@ -311,7 +311,7 @@ void _handleSwap(struct Node *process_node, int cell_idx) {
   last_freed_frame_addr = searchLeastFrequentlyUsedFrameIdx(head_process, last_freed_frame_addr);
   struct page_table_cell *last_freed_cell = &last_freed_frame_addr->initial_process->data.page_table[last_freed_frame_addr->initial_page];
 
-  mmu_nonresident(process_node->data.pid, (void *) last_freed_cell->page);
+  mmu_nonresident(last_freed_frame_addr->initial_process->data.pid, (void *) last_freed_cell->page);
   
   if(last_freed_cell->has_data) {
     mmu_disk_write(last_freed_cell->frame, last_freed_cell->frame);
