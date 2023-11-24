@@ -325,6 +325,8 @@ struct Node* head_process = NULL;   /**< Head of the process linked list */
  * @param nblocks The number of blocks.
  */
 void pager_init(int nframes, int nblocks) {
+  pthread_mutex_init(&locker, NULL);
+  pthread_mutex_trylock(&locker);
   if (nframes <= 0 || nblocks <= 0) {
     printf("Pager initialization failed\n");
 		exit(EXIT_FAILURE);
@@ -342,7 +344,7 @@ void pager_init(int nframes, int nblocks) {
   for (int i = 0; i < nblocks; i++) {
     blocks_vector[i] = -1;
   }
-  pthread_mutex_init(&locker, NULL);
+  pthread_mutex_unlock(&locker);
 }
 
 /**
@@ -351,7 +353,9 @@ void pager_init(int nframes, int nblocks) {
  * @param pid The process ID.
  */
 void pager_create(pid_t pid) {
+  pthread_mutex_trylock(&locker);
   insert(&head_process, pid);
+  pthread_mutex_unlock(&locker);
 }
 
 /**
@@ -442,25 +446,39 @@ void pager_destroy(pid_t pid) {
  * @param process_node Pointer to the process node in the page table.
  * @param cell_idx Index of the page table cell to be swapped.
  */
-void _handleSwap(struct Node *process_node, int cell_idx) {
+void _handleSwap(struct Node *process_node, int cell_idx, int has_empty_frame) {
   struct page_table_cell *page_cell = &process_node->data.page_table[cell_idx];
   
-  last_freed_frame_addr = searchLeastFrequentlyUsedFrameIdx(head_process, last_freed_frame_addr);
-  struct page_table_cell *last_freed_cell = &last_freed_frame_addr->initial_process->data.page_table[last_freed_frame_addr->initial_page];
+  int new_frame = -1;
+  if(!has_empty_frame) {
+    last_freed_frame_addr = searchLeastFrequentlyUsedFrameIdx(head_process, last_freed_frame_addr);
+    struct page_table_cell *last_freed_cell = &last_freed_frame_addr->initial_process->data.page_table[last_freed_frame_addr->initial_page];
+    mmu_nonresident(last_freed_frame_addr->initial_process->data.pid, (void *) last_freed_cell->page);
+    if(last_freed_cell->has_data) {
+      mmu_disk_write(last_freed_cell->frame, last_freed_cell->frame);
+    }
 
-  mmu_nonresident(last_freed_frame_addr->initial_process->data.pid, (void *) last_freed_cell->page);
-  
-  if(last_freed_cell->has_data) {
-    mmu_disk_write(last_freed_cell->frame, last_freed_cell->frame);
-  }
-  if(page_cell->has_data) {
-    mmu_disk_read(page_cell->frame, last_freed_cell->frame);
+    last_freed_cell->present = 0;
+    new_frame = last_freed_cell->frame;
   } else {
-    mmu_zero_fill(last_freed_cell->frame);
+    for (int i=0; i < frames_vector_size; i++) {
+      if (frames_vector[i] == -1) {
+        frames_vector[i] = process_node->data.pid;
+        free_frames--;
+        new_frame = i;
+        break;
+      }
+    }
   }
-  last_freed_cell->present = 0;
 
-  page_cell->frame = last_freed_cell->frame;
+  
+  if(page_cell->has_data) {
+    mmu_disk_read(page_cell->frame, new_frame);
+  } else {
+    mmu_zero_fill(new_frame);
+  }
+
+  page_cell->frame = new_frame;
   mmu_resident(process_node->data.pid, (void *) page_cell->page, page_cell->frame, PROT_READ);
   page_cell->prot = PROT_READ;
   page_cell->recently_accessed = 1;
@@ -508,7 +526,7 @@ void pager_fault(pid_t pid, void *addr) {
           page_cell->recently_accessed = 1;
         } else {
           // Handle the case when there are no free frames available
-          _handleSwap(process_node, i);
+          _handleSwap(process_node, i, 0);
         }
         
         page_cell->valid = 1;
@@ -532,7 +550,7 @@ void pager_fault(pid_t pid, void *addr) {
       } 
       // Handle the case when the page is not present
       else if (page_cell->present == 0) {
-        _handleSwap(process_node, i);
+        _handleSwap(process_node, i, (free_frames > 0));
         page_cell->present = 1;
         break;
       } 
